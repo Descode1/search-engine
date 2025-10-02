@@ -1,26 +1,61 @@
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urldefrag
+from urllib.parse import urljoin, urldefrag, urlparse
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 import csv
+import random
 import re
 
+# checking for a robots.txt 
+def can_crawl(url):
+    parsed_url = urlparse(url)
+    robots_url = f"{parsed_url.scheme}://{parsed_url.netloc}/robots.txt"
 
+    time.sleep(random.uniform(1, 2)) 
+
+    try:
+        response = requests.get(robots_url, timeout=5)
+        response.raise_for_status()
+    except requests.RequestException:
+        return True  
+
+    disallowed_paths = []
+    current_user_agent = None
+    for line in response.text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.lower().startswith("user-agent"):
+            current_user_agent = line.split(":")[1].strip()
+        if line.lower().startswith("disallow"):
+            path = line.split(":")[1].strip()
+            if current_user_agent in ("*", "MyCrawler") and path:
+                disallowed_paths.append(path)
+
+    for path in disallowed_paths:
+        if urlparse(url).path.startswith(path):
+            return False
+    return True
+
+# worker function for threads
 def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_depth, headers, csv_file, csv_writer):
     while True:
         try:
-            url, depth = queue.get(timeout=5) 
+            url, depth = queue.get(timeout=5)
         except:
-            break  
+            break
 
         try:
             with visited_lock:
                 if url in visited or len(visited) >= max_pages or depth > max_depth:
                     continue
                 visited.add(url)
+
+            if not can_crawl(url):
+                continue
 
             try:
                 response = requests.get(url, headers=headers, timeout=5)
@@ -31,21 +66,16 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
 
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # --- Title ---
+           # gets the title
             title_tag = soup.select_one("title")
             title = title_tag.get_text(strip=True) if title_tag else None
 
-            # --- Content ---
-            content = soup
-
+            # gets meta description if available else gets wikipedia's main content
             description = None
-
-            # Try meta description first
             meta_tag = soup.find("meta", attrs={"name": "description"})
             if meta_tag and meta_tag.get("content"):
                 description = meta_tag["content"].strip()
             else:
-                # Fallback: main content text
                 main_content = soup.select_one("div#mw-content-text")
                 text = main_content.get_text(" ", strip=True) if main_content else ""
                 text = re.sub(r"\[\d+\]", "", text)
@@ -55,13 +85,13 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
                 if description and not description.endswith("."):
                     description += "."
 
-            # --- Favicon ---
+            # gets the favicon 
             favicon = None
             icon_link = soup.find("link", rel=lambda x: x and "icon" in x.lower())
             if icon_link and icon_link.get("href"):
                 favicon = urljoin(url, icon_link["href"])
 
-            # --- Save results ---
+            # saves results 
             with results_lock:
                 results[url] = {
                     "title": title,
@@ -69,24 +99,22 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
                     "favicon": favicon,
                 }
                 csv_writer.writerow([url, title, description, favicon])
-                csv_file.flush()  
+                csv_file.flush()
 
-            # --- Crawl links ---
-            if depth < max_depth and content:
-                for link in content.select("a[href]"):
+            # Crawl links 
+            if depth < max_depth:
+                for link in soup.select("a[href]"):
                     href = link["href"]
                     new_url = urljoin(url, href)
                     new_url, _ = urldefrag(new_url)
 
-                    # If link is not HTTP, skip
                     if not new_url.startswith("http"):
                         continue
 
-                    # If the page is from Wikipedia, restrict to English only
+                    # Wikipedia English only
                     if "wikipedia.org" in new_url:
                         if not new_url.startswith("https://en.wikipedia.org/wiki/"):
                             continue
-                        # skip non-article namespaces
                         if any(new_url.startswith(f"https://en.wikipedia.org{prefix}") for prefix in (
                             "/wiki/Special:", "/wiki/File:", "/wiki/Help:", "/wiki/Talk:",
                             "/wiki/Category:", "/wiki/Portal:", "/wiki/Wikipedia:",
@@ -95,48 +123,43 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
                         )):
                             continue
 
-                    # Add to queue if not visited
                     with visited_lock:
                         if new_url not in visited:
                             queue.put((new_url, depth + 1))
 
-            time.sleep(0.2)  
+            time.sleep(0.2)
 
         finally:
-            queue.task_done()  
+            queue.task_done()
 
-
-def crawl(seed_url, max_pages, max_depth, num_threads, csv_filename):
+# main crawl function
+def crawl(seed_url, max_pages=100, max_depth=2, num_threads=10, csv_filename="crawl.csv"):
     visited = set()
     visited_lock = threading.Lock()
-    results = {}         
+    results = {}
     results_lock = threading.Lock()
-
     queue = Queue()
     queue.put((seed_url, 0))
-
     headers = {"User-Agent": "MyCrawler/1.0"}
 
     with open(csv_filename, 'w', newline='', encoding='utf-8') as csv_file:
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(["URL", "Title", "Description", "Favicon"])
-        
+
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for _ in range(num_threads):
                 executor.submit(worker, queue, visited, visited_lock,
-                                results, results_lock, max_pages, max_depth, 
+                                results, results_lock, max_pages, max_depth,
                                 headers, csv_file, csv_writer)
             queue.join()
 
     return results
 
 
-# Run the crawler
-pages = crawl("https://en.wikipedia.org/wiki/Rwanda", 100, 2, 50, "crawl.csv")
-
-print("\n" + "="*50)
-print("Crawling completed!")
-print(f"Total pages crawled: {len(pages)}")
-print("Results saved to: crawl.csv")
-print("="*50 + "\n")
-
+if __name__ == "__main__":
+    pages = crawl("https://en.wikipedia.org/wiki/Rwanda", max_pages=100, max_depth=2, num_threads=50)
+    print("\n" + "="*50)
+    print("Crawling completed!")
+    print(f"Total pages crawled: {len(pages)}")
+    print("Results saved to: crawl.csv")
+    print("="*50 + "\n")
