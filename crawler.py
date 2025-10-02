@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 import csv
+import re
 
 
 def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_depth, headers, csv_file, csv_writer):
@@ -30,19 +31,25 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
 
             soup = BeautifulSoup(response.text, "html.parser")
 
-         
+            # --- Title ---
             title_tag = soup.select_one("title")
             title = title_tag.get_text(strip=True) if title_tag else None
 
-            if "wikipedia.org" in url:
-                content = soup.select_one("div#mw-content-text > div.mw-parser-output")
-            else:
-                content = soup
+            # --- Content ---
+            content = soup
 
-            
             description = None
-            if content:
-                text = content.get_text(" ", strip=True)
+
+            # Try meta description first
+            meta_tag = soup.find("meta", attrs={"name": "description"})
+            if meta_tag and meta_tag.get("content"):
+                description = meta_tag["content"].strip()
+            else:
+                # Fallback: main content text
+                main_content = soup.select_one("div#mw-content-text")
+                text = main_content.get_text(" ", strip=True) if main_content else ""
+                text = re.sub(r"\[\d+\]", "", text)
+                text = re.sub(r"\s+", " ", text)
                 sentences = text.split(".")
                 description = ". ".join(sentences[:3]).strip()
                 if description and not description.endswith("."):
@@ -54,32 +61,44 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
             if icon_link and icon_link.get("href"):
                 favicon = urljoin(url, icon_link["href"])
 
-            # --- Save results per page ---
+            # --- Save results ---
             with results_lock:
                 results[url] = {
                     "title": title,
                     "description": description,
                     "favicon": favicon,
-                    
                 }
-            
                 csv_writer.writerow([url, title, description, favicon])
                 csv_file.flush()  
 
-           
+            # --- Crawl links ---
             if depth < max_depth and content:
                 for link in content.select("a[href]"):
                     href = link["href"]
-                    if any(href.startswith(prefix) for prefix in ("#", "/wiki/Special:", "/wiki/File:", "/wiki/Help:")):
-                        continue
-
                     new_url = urljoin(url, href)
                     new_url, _ = urldefrag(new_url)
 
-                    if new_url.startswith("http"):
-                        with visited_lock:
-                            if new_url not in visited:
-                                queue.put((new_url, depth + 1))
+                    # If link is not HTTP, skip
+                    if not new_url.startswith("http"):
+                        continue
+
+                    # If the page is from Wikipedia, restrict to English only
+                    if "wikipedia.org" in new_url:
+                        if not new_url.startswith("https://en.wikipedia.org/wiki/"):
+                            continue
+                        # skip non-article namespaces
+                        if any(new_url.startswith(f"https://en.wikipedia.org{prefix}") for prefix in (
+                            "/wiki/Special:", "/wiki/File:", "/wiki/Help:", "/wiki/Talk:",
+                            "/wiki/Category:", "/wiki/Portal:", "/wiki/Wikipedia:",
+                            "/wiki/Template:", "/wiki/Book:", "/wiki/Draft:",
+                            "/wiki/Module:", "/wiki/User:", "/wiki/Project:"
+                        )):
+                            continue
+
+                    # Add to queue if not visited
+                    with visited_lock:
+                        if new_url not in visited:
+                            queue.put((new_url, depth + 1))
 
             time.sleep(0.2)  
 
@@ -98,7 +117,6 @@ def crawl(seed_url, max_pages, max_depth, num_threads, csv_filename):
 
     headers = {"User-Agent": "MyCrawler/1.0"}
 
-    
     with open(csv_filename, 'w', newline='', encoding='utf-8') as csv_file:
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(["URL", "Title", "Description", "Favicon"])
@@ -114,10 +132,11 @@ def crawl(seed_url, max_pages, max_depth, num_threads, csv_filename):
 
 
 # Run the crawler
-pages = crawl("https://en.wikipedia.org/wiki/Rwanda", 1000, 2, 50, "crawl.csv")
+pages = crawl("https://en.wikipedia.org/wiki/Rwanda", 100, 2, 50, "crawl.csv")
 
 print("\n" + "="*50)
-print(f"Crawling completed!")
+print("Crawling completed!")
 print(f"Total pages crawled: {len(pages)}")
-print(f"Results saved to: crawl.csv")
+print("Results saved to: crawl.csv")
 print("="*50 + "\n")
+
