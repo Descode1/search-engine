@@ -155,7 +155,7 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
 
 
 # main crawl function
-def crawl(seed_url, max_pages=20000, max_depth=5, num_threads=50, csv_filename="crawl.csv"):
+def crawl(seed_url, max_pages=1000000, max_depth=5, num_threads=50, csv_filename="crawl.csv"):
     visited = set()
     visited_lock = threading.Lock()
     results = {}
