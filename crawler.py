@@ -65,6 +65,16 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
                 continue
 
             soup = BeautifulSoup(response.text, "html.parser")
+            full_content = None
+            main_content = soup.select_one("div#mw-content-text")
+            if main_content:
+                full_content = main_content.get_text(" ", strip=True)
+                full_content = re.sub(r"\[\d+\]", "", full_content)
+                full_content = re.sub(r"\s+", " ", full_content)
+            else:
+            # fallback: get all text from the page
+                full_content = soup.get_text(" ", strip=True)
+                full_content = re.sub(r"\s+", " ", full_content)
 
            # gets the title
             title_tag = soup.select_one("title")
@@ -97,8 +107,9 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
                     "title": title,
                     "description": description,
                     "favicon": favicon,
+                    "content": full_content
                 }
-                csv_writer.writerow([url, title, description, favicon])
+                csv_writer.writerow([url, title, description, favicon, full_content])
                 csv_file.flush()
 
             # Crawl links 
@@ -133,7 +144,7 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
             queue.task_done()
 
 # main crawl function
-def crawl(seed_url, max_pages=100, max_depth=2, num_threads=10, csv_filename="crawl.csv"):
+def crawl(seed_url, max_pages=10000, max_depth=5, num_threads=50, csv_filename="crawl.csv"):
     visited = set()
     visited_lock = threading.Lock()
     results = {}
@@ -144,7 +155,7 @@ def crawl(seed_url, max_pages=100, max_depth=2, num_threads=10, csv_filename="cr
 
     with open(csv_filename, 'w', newline='', encoding='utf-8') as csv_file:
         csv_writer = csv.writer(csv_file)
-        csv_writer.writerow(["URL", "Title", "Description", "Favicon"])
+        csv_writer.writerow(["URL", "Title", "Description", "Favicon","content"])
 
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             for _ in range(num_threads):
@@ -157,7 +168,7 @@ def crawl(seed_url, max_pages=100, max_depth=2, num_threads=10, csv_filename="cr
 
 
 if __name__ == "__main__":
-    pages = crawl("https://en.wikipedia.org/wiki/Rwanda", max_pages=100, max_depth=2, num_threads=50)
+    pages = crawl("https://en.wikipedia.org/wiki/Rwanda")
     print("\n" + "="*50)
     print("Crawling completed!")
     print(f"Total pages crawled: {len(pages)}")
