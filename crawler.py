@@ -8,6 +8,7 @@ import time
 import csv
 import random
 import re
+import sys
 
 # checking for a robots.txt 
 def can_crawl(url):
@@ -40,8 +41,9 @@ def can_crawl(url):
             return False
     return True
 
+
 # worker function for threads
-def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_depth, headers, csv_file, csv_writer):
+def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_depth, headers, csv_file, csv_writer, progress, progress_lock):
     while True:
         try:
             url, depth = queue.get(timeout=5)
@@ -72,15 +74,14 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
                 full_content = re.sub(r"\[\d+\]", "", full_content)
                 full_content = re.sub(r"\s+", " ", full_content)
             else:
-            # fallback: get all text from the page
                 full_content = soup.get_text(" ", strip=True)
                 full_content = re.sub(r"\s+", " ", full_content)
 
-           # gets the title
+            # gets the title
             title_tag = soup.select_one("title")
             title = title_tag.get_text(strip=True) if title_tag else None
 
-            # gets meta description if available else gets wikipedia's main content
+            # gets meta description
             description = None
             meta_tag = soup.find("meta", attrs={"name": "description"})
             if meta_tag and meta_tag.get("content"):
@@ -111,6 +112,15 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
                 }
                 csv_writer.writerow([url, title, description, favicon, full_content])
                 csv_file.flush()
+
+            # update progress
+            with progress_lock:
+                progress["count"] += 1
+                crawled = progress["count"]
+                if crawled % 10 == 0 or crawled == max_pages:  # print every 10 pages
+                    percent = (crawled / max_pages) * 100
+                    sys.stdout.write(f"\rCrawled {crawled}/{max_pages} pages ({percent:.2f}%)")
+                    sys.stdout.flush()
 
             # Crawl links 
             if depth < max_depth:
@@ -143,12 +153,15 @@ def worker(queue, visited, visited_lock, results, results_lock, max_pages, max_d
         finally:
             queue.task_done()
 
+
 # main crawl function
-def crawl(seed_url, max_pages=10000, max_depth=5, num_threads=50, csv_filename="crawl.csv"):
+def crawl(seed_url, max_pages=20000, max_depth=5, num_threads=50, csv_filename="crawl.csv"):
     visited = set()
     visited_lock = threading.Lock()
     results = {}
     results_lock = threading.Lock()
+    progress = {"count": 0}
+    progress_lock = threading.Lock()
     queue = Queue()
     queue.put((seed_url, 0))
     headers = {"User-Agent": "MyCrawler/1.0"}
@@ -161,9 +174,11 @@ def crawl(seed_url, max_pages=10000, max_depth=5, num_threads=50, csv_filename="
             for _ in range(num_threads):
                 executor.submit(worker, queue, visited, visited_lock,
                                 results, results_lock, max_pages, max_depth,
-                                headers, csv_file, csv_writer)
+                                headers, csv_file, csv_writer,
+                                progress, progress_lock)
             queue.join()
 
+    print()  # move to next line after progress bar
     return results
 
 
@@ -171,6 +186,4 @@ if __name__ == "__main__":
     pages = crawl("https://en.wikipedia.org/wiki/Rwanda")
     print("\n" + "="*50)
     print("Crawling completed!")
-    print(f"Total pages crawled: {len(pages)}")
-    print("Results saved to: crawl.csv")
     print("="*50 + "\n")
